@@ -8,7 +8,7 @@
 ## Contrôles et persistance
 - [x] Permettre la création de moniteurs HTTP, PING et PORT avec URL ou hôte, fréquence et premier contrôle immédiat.
 - [x] Exécuter les contrôles côté serveur avec timeout, code HTTP, temps de réponse et message d’erreur réel.
-- [x] Persister les moniteurs et chaque résultat de contrôle dans la base MySQL gérée du projet.
+- [x] Persister les moniteurs et chaque résultat de contrôle dans Supabase (Postgres) avec historique et suppression en cascade.
 - [x] Recalculer l’uptime sur les checks réellement enregistrés et afficher « jamais vérifié » lorsqu’il n’existe encore aucun contrôle.
 - [x] Exposer un endpoint de santé et un endpoint de contrôle groupé utilisables par le serveur et l’actualisation du dashboard.
 - [x] Exécuter automatiquement côté serveur les contrôles arrivés à échéance toutes les 30 secondes, même sans dashboard ouvert.
