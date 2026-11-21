@@ -255,3 +255,13 @@ tbody tr:hover { background: #fbfbfe; }
   .footer { align-items: flex-start; flex-direction: column; gap: 9px; }.footer-links { margin-top: 3px; }
   .detail-panel { padding: 21px 20px; }.detail-hero { margin-top: 29px; }.detail-metrics { gap: 8px; }.detail-metrics span { font-size: 8px; }.detail-metrics strong { font-size: 13px; }.modal-actions .button { flex: 1; }.add-modal { padding: 21px; }
 }
+
+/* Mzouti Uptime functional controls */
+.detail-actions { display:flex; gap:9px; margin:18px 0 10px; }
+.detail-actions .button { flex:1; justify-content:center; }
+.detail-actions .button:disabled, .delete-monitor-button:disabled { opacity:.55; cursor:not-allowed; }
+.history-list { display:grid; gap:7px; margin-top:12px; max-height:240px; overflow:auto; }
+.history-row { display:grid; grid-template-columns:12px minmax(0,1fr) auto auto; align-items:center; gap:8px; padding:8px 9px; border:1px solid var(--line); border-radius:8px; color:var(--muted); font-size:9px; }
+.history-row strong { max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text,#4c5970); }
+.history-row small { white-space:nowrap; }
+.detail-actions + .delete-monitor-button { display:flex; align-items:center; justify-content:center; gap:7px; }

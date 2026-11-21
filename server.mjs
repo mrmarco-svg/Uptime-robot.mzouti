@@ -1,8 +1,13 @@
 import express from 'express'
+import { createClient } from '@supabase/supabase-js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { createConnection } from 'node:net'
+import { createConnection, isIP } from 'node:net'
+import { lookup } from 'node:dns/promises'
+import http from 'node:http'
+import https from 'node:https'
 import { performance } from 'node:perf_hooks'
+import { timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { createServer as createViteServer } from 'vite'
@@ -11,158 +16,442 @@ const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = process.argv.includes('--dev')
 const port = Number(process.env.PORT || 3000)
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rvjzubrksvaivcvmrqmi.supabase.co'
-const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || 'sb_publishable_-I_VNv-8UqjoAoYtyV3Tfw_C4vaCd0Z'
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+const CRON_SECRET = process.env.CRON_SECRET || ''
+const CHECK_INTERVAL_MS = 30000
+const CHECK_TIMEOUT_MS = 12000
+const PAGE_SIZE = 1000
+const MAX_MONITORS = 200
+const intervals = { '1 min': 60, '5 min': 300, '10 min': 600, '15 min': 900 }
+const allowedTypes = new Set(['HTTP', 'PING', 'PORT'])
+const inFlight = new Set()
+
+if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('SUPABASE_URL et SUPABASE_PUBLISHABLE_KEY sont obligatoires.')
+
 const app = express()
-app.use(express.json({ limit: '64kb' }))
-
-function serviceAuthHeader() {
-  return SUPABASE_SERVICE_ROLE_KEY ? `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` : `Bearer ${SUPABASE_KEY}`
-}
-function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization
-  if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentification requise' })
-  req.authHeader = authHeader
+app.disable('x-powered-by')
+app.set('trust proxy', 1)
+app.use(express.json({ limit: '32kb' }))
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store')
   next()
-}
+})
 
-async function supabaseRequest(table, { method = 'GET', query = {}, body, headers = {}, authHeader } = {}) {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) params.set(key, String(value))
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params.toString() ? `?${params}` : ''}`, {
-    method,
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: authHeader || `Bearer ${SUPABASE_KEY}`,
-      Accept: 'application/json',
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-      ...headers,
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-    signal: AbortSignal.timeout(10000),
+const publicClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+})
+const adminClient = SERVICE_ROLE_KEY ? createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+}) : null
+
+function makeUserClient(token) {
+  return createClient(SUPABASE_URL, SUPABASE_KEY, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   })
-  const text = await response.text()
-  let payload = null
-  try { payload = text ? JSON.parse(text) : null } catch { payload = text }
-  if (!response.ok) throw new Error(payload?.message || payload?.hint || payload?.error_description || `Supabase request failed (${response.status})`)
-  return payload
 }
 
-const intervalSeconds = { '1 min': 60, '5 min': 300, '10 min': 600, '15 min': 900 }
-function intervalLabel(seconds) {
-  const entry = Object.entries(intervalSeconds).find(([, value]) => value === Number(seconds))
-  return entry?.[0] ?? `${Math.max(1, Math.round(Number(seconds) / 60))} min`
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ''))
+  const right = Buffer.from(String(b || ''))
+  return left.length > 0 && left.length === right.length && timingSafeEqual(left, right)
 }
-function normalizeUrl(value, type) {
-  const raw = String(value || '').trim()
-  if (!raw) throw new Error('URL is required')
-  if (type === 'PING' && !raw.includes('://')) return `http://${raw}`
-  if (type === 'PORT' && !raw.includes('://')) return `tcp://${raw}`
-  const parsed = new URL(raw)
-  if (type === 'HTTP' && !['http:', 'https:'].includes(parsed.protocol)) throw new Error('HTTP monitors require an http:// or https:// URL')
-  if (type === 'PING' && !['http:', 'https:'].includes(parsed.protocol)) throw new Error('PING monitors require a hostname or URL')
-  if (type === 'PORT' && !['tcp:', 'http:', 'https:'].includes(parsed.protocol)) throw new Error('PORT monitors require a host:port value')
-  return raw
-}
-function relativeTime(value) {
-  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000))
-  if (seconds < 5) return "l’instant"
-  if (seconds < 60) return `il y a ${seconds} s`
-  return `il y a ${Math.round(seconds / 60)} min`
-}
-function serializeDate(value) { return value ? new Date(value).toISOString() : null }
 
-async function monitorPayload(row, authHeader = serviceAuthHeader()) {
-  const checks = await supabaseRequest('monitor_checks', { authHeader, query: { select: 'result_status,response_ms,checked_at', monitor_id: `eq.${row.id}`, checked_at: `gte.${new Date(Date.now() - 30 * 86400000).toISOString()}`, order: 'checked_at.desc', limit: 100 } })
-  const totalChecks = checks.length
-  const successfulChecks = checks.filter((check) => check.result_status === 'up').length
-  const responses = checks.filter((check) => check.response_ms != null).map((check) => Number(check.response_ms))
-  return {
-    id: Number(row.id), name: row.name, url: row.url, type: row.monitor_type, status: row.status,
-    uptime: totalChecks ? Number(((successfulChecks / totalChecks) * 100).toFixed(2)) : 0,
-    response: responses.length ? Math.round(responses.reduce((sum, value) => sum + value, 0) / responses.length) : 0,
-    lastCheck: row.last_check_at ? `à ${relativeTime(row.last_check_at)}` : 'jamais vérifié',
-    lastCheckAt: serializeDate(row.last_check_at), interval: intervalLabel(row.interval_seconds), intervalSeconds: Number(row.interval_seconds),
-    location: 'Serveur Mzouti', tags: [row.monitor_type], chart: checks.reverse().map((check) => check.result_status === 'up' ? 100 : 12),
+const rateBuckets = new Map()
+function rateLimit({ windowMs = 60000, max = 90 } = {}) {
+  return (req, res, next) => {
+    const key = req.ip || req.socket.remoteAddress || 'unknown'
+    const now = Date.now()
+    let bucket = rateBuckets.get(key)
+    if (!bucket || now >= bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + windowMs }
+      rateBuckets.set(key, bucket)
+    }
+    bucket.count += 1
+    res.setHeader('RateLimit-Limit', String(max))
+    res.setHeader('RateLimit-Remaining', String(Math.max(0, max - bucket.count)))
+    if (bucket.count > max) return res.status(429).json({ error: 'Trop de requêtes. Réessaie dans un instant.' })
+    next()
   }
 }
-async function listMonitors(authHeader = serviceAuthHeader()) {
-  const rows = await supabaseRequest('monitors', { authHeader, query: { select: 'id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at,created_at', order: 'created_at.desc', limit: 200 } })
-  return Promise.all(rows.map((row) => monitorPayload(row, authHeader)))
-}
-async function findMonitor(id, authHeader = serviceAuthHeader()) {
-  const rows = await supabaseRequest('monitors', { authHeader, query: { select: 'id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at', id: `eq.${id}`, limit: 1 } })
-  return rows[0] || null
-}
-async function checkHttp(target) {
-  const started = performance.now()
-  const response = await fetch(target, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(10000) })
-  return { status: response.status >= 200 && response.status < 400 ? 'up' : 'down', statusCode: response.status, responseMs: Math.max(1, Math.round(performance.now() - started)), error: null }
-}
-async function checkPing(target) {
-  const parsed = new URL(target)
-  const { stdout } = await execFileAsync('ping', ['-c', '1', '-W', '3', parsed.hostname], { timeout: 5000 })
-  const match = stdout.match(/time[=<]([\d.]+)/)
-  return { status: 'up', statusCode: null, responseMs: match ? Math.max(1, Math.round(Number(match[1]))) : 1, error: null }
-}
-async function checkPort(target) {
-  const parsed = new URL(target)
-  const portNumber = Number(parsed.port)
-  if (!portNumber || portNumber > 65535) throw new Error('PORT monitors require a valid port, for example tcp://example.com:443')
-  const started = performance.now()
-  await new Promise((resolve, reject) => {
-    const socket = createConnection({ host: parsed.hostname, port: portNumber, timeout: 8000 })
-    const finish = (error) => { socket.destroy(); error ? reject(error) : resolve() }
-    socket.once('connect', () => finish()); socket.once('timeout', () => finish(new Error('Connection timeout'))); socket.once('error', finish)
-  })
-  return { status: 'up', statusCode: null, responseMs: Math.max(1, Math.round(performance.now() - started)), error: null }
-}
-async function executeCheck(monitor, authHeader = serviceAuthHeader()) {
-  let result
+app.use('/api/', rateLimit())
+
+async function authenticate(req, res, next) {
+  const match = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i)
+  if (!match) return res.status(401).json({ error: 'Authentification requise.' })
   try {
-    const target = normalizeUrl(monitor.url, monitor.monitor_type)
-    result = monitor.monitor_type === 'PING' ? await checkPing(target) : monitor.monitor_type === 'PORT' ? await checkPort(target) : await checkHttp(target)
-  } catch (error) {
-    result = { status: 'down', statusCode: null, responseMs: null, error: String(error?.message || 'Check failed').slice(0, 500) }
+    const { data, error } = await publicClient.auth.getUser(match[1])
+    if (error || !data?.user?.id) return res.status(401).json({ error: 'Session invalide ou expirée.' })
+    req.user = data.user
+    req.db = makeUserClient(match[1])
+    next()
+  } catch {
+    res.status(401).json({ error: 'Impossible de vérifier la session.' })
   }
-  await supabaseRequest('monitor_checks', { method: 'POST', authHeader, body: { monitor_id: monitor.id, result_status: result.status, status_code: result.statusCode, response_ms: result.responseMs, error_message: result.error } })
-  await supabaseRequest('monitors', { method: 'PATCH', authHeader, query: { id: `eq.${monitor.id}` }, body: { status: result.status, response_ms: result.responseMs, last_check_at: new Date().toISOString() } })
-  return result
 }
-async function checkDueMonitors(force = false, authHeader = serviceAuthHeader()) {
-  const rows = await supabaseRequest('monitors', { authHeader, query: { select: 'id,name,url,monitor_type,interval_seconds,status,last_check_at', status: 'neq.paused', limit: 200 } })
+
+function fail(res, error, status = 503) {
+  const message = String(error?.message || 'Erreur interne.')
+  if (status >= 500) console.error('[Mzouti Uptime]', message)
+  return res.status(status).json({ error: status >= 500 ? 'Le service est temporairement indisponible.' : message })
+}
+
+function normalizeTarget(value, type) {
+  const raw = String(value || '').trim()
+  if (!raw || raw.length > 2048) throw new Error('Adresse invalide.')
+  if (!allowedTypes.has(type)) throw new Error('Type de contrôle invalide.')
+  const normalized = type === 'PING' && !raw.includes('://') ? `http://${raw}` : type === 'PORT' && !raw.includes('://') ? `tcp://${raw}` : raw
+  const parsed = new URL(normalized)
+  if (type === 'HTTP' && !['http:', 'https:'].includes(parsed.protocol)) throw new Error('HTTP nécessite une adresse http:// ou https://.')
+  if (type === 'PING' && !['http:', 'https:'].includes(parsed.protocol)) throw new Error('PING nécessite un nom de domaine ou une adresse IP.')
+  if (type === 'PORT' && parsed.protocol !== 'tcp:') throw new Error('PORT nécessite tcp://hote:port.')
+  if (!parsed.hostname || parsed.username || parsed.password) throw new Error('Hôte invalide.')
+  if (type === 'PORT' && (!parsed.port || Number(parsed.port) < 1 || Number(parsed.port) > 65535)) throw new Error('Port invalide.')
+  return { raw: normalized, parsed }
+}
+
+function isPublicAddress(address) {
+  const version = isIP(address)
+  if (version === 4) {
+    const [a, b] = address.split('.').map(Number)
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return false
+    if (a === 100 && b >= 64 && b <= 127) return false
+    if (a === 169 && b === 254) return false
+    if (a === 172 && b >= 16 && b <= 31) return false
+    if (a === 192 && (b === 0 || b === 168)) return false
+    if (a === 192 && b === 88) return false
+    if (a === 198 && (b === 18 || b === 19 || b === 51)) return false
+    if (a === 203 && b === 0) return false
+    return true
+  }
+  if (version === 6) {
+    const value = address.toLowerCase()
+    if (value.startsWith('::ffff:')) return isPublicAddress(value.slice(7))
+    return value.startsWith('2') || value.startsWith('3')
+  }
+  return false
+}
+
+async function resolvePublicHost(hostname) {
+  if (isIP(hostname)) {
+    if (!isPublicAddress(hostname)) throw new Error('Les adresses réseau privées ou réservées ne sont pas autorisées.')
+    return hostname
+  }
+  const records = await lookup(hostname, { all: true, verbatim: true })
+  if (!records.length || records.some((record) => !isPublicAddress(record.address))) {
+    throw new Error('Ce domaine pointe vers une adresse privée ou réservée et ne peut pas être surveillé.')
+  }
+  return records[0].address
+}
+
+function checkHttp(target, address) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(target)
+    const transport = parsed.protocol === 'https:' ? https : http
+    const started = performance.now()
+    let settled = false
+    const request = transport.request(parsed, {
+      method: 'GET', agent: false, servername: parsed.hostname,
+      lookup: (_hostname, _options, callback) => callback(null, address, isIP(address)),
+      headers: { 'User-Agent': 'Mzouti-Uptime/2.1', Accept: '*/*' },
+    }, (response) => {
+      const statusCode = response.statusCode || 0
+      response.resume()
+      settled = true
+      resolve({ status: statusCode >= 200 && statusCode < 400 ? 'up' : 'down', statusCode,
+        responseMs: Math.max(1, Math.round(performance.now() - started)), error: statusCode >= 400 ? `HTTP ${statusCode}` : null })
+    })
+    request.setTimeout(CHECK_TIMEOUT_MS, () => request.destroy(new Error('Délai de réponse dépassé.')))
+    request.on('error', (error) => { if (!settled) reject(error) })
+    request.end()
+  })
+}
+
+async function checkPing(address) {
+  const started = performance.now()
+  const { stdout } = await execFileAsync('ping', ['-c', '1', '-W', '4', address], { timeout: 6000 })
+  const match = stdout.match(/time[=<]([\d.]+)/)
+  return { status: 'up', statusCode: null,
+    responseMs: match ? Math.max(1, Math.round(Number(match[1]))) : Math.max(1, Math.round(performance.now() - started)), error: null }
+}
+
+function checkPort(address, portNumber) {
+  const started = performance.now()
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: address, port: portNumber, timeout: 8000 })
+    let settled = false
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      if (error) reject(error)
+      else resolve({ status: 'up', statusCode: null, responseMs: Math.max(1, Math.round(performance.now() - started)), error: null })
+    }
+    socket.once('connect', () => finish())
+    socket.once('timeout', () => finish(new Error('Délai de connexion dépassé.')))
+    socket.once('error', finish)
+  })
+}
+
+async function executeCheck(monitor, db = adminClient) {
+  if (!db) throw new Error('SUPABASE_SERVICE_ROLE_KEY manquante.')
+  const key = String(monitor.id)
+  if (inFlight.has(key)) return { skipped: true, reason: 'already-running' }
+  inFlight.add(key)
+  try {
+    if (monitor.status === 'paused') return { skipped: true, reason: 'paused' }
+    const { parsed } = normalizeTarget(monitor.url, monitor.monitor_type)
+    const address = await resolvePublicHost(parsed.hostname)
+    let result
+    if (monitor.monitor_type === 'PING') result = await checkPing(address)
+    else if (monitor.monitor_type === 'PORT') result = await checkPort(address, Number(parsed.port))
+    else result = await checkHttp(parsed.href, address)
+    const { error: insertError } = await db.from('monitor_checks').insert({ monitor_id: monitor.id,
+      result_status: result.status, status_code: result.statusCode, response_ms: result.responseMs, error_message: result.error })
+    if (insertError) throw insertError
+    const { error: updateError } = await db.from('monitors').update({ status: result.status, response_ms: result.responseMs,
+      last_check_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', monitor.id).neq('status', 'paused')
+    if (updateError) throw updateError
+    return result
+  } catch (error) {
+    const result = { status: 'down', statusCode: null, responseMs: null, error: String(error?.message || 'Échec du contrôle').slice(0, 500) }
+    const { error: insertError } = await db.from('monitor_checks').insert({ monitor_id: monitor.id, result_status: 'down',
+      status_code: null, response_ms: null, error_message: result.error })
+    if (insertError) console.error('Unable to save failed check:', insertError.message)
+    await db.from('monitors').update({ status: 'down', response_ms: null, last_check_at: new Date().toISOString(),
+      updated_at: new Date().toISOString() }).eq('id', monitor.id).neq('status', 'paused')
+    return result
+  } finally { inFlight.delete(key) }
+}
+
+async function readChecks(db, monitorId, since) {
+  const all = []
+  for (let offset = 0; offset < 50000; offset += PAGE_SIZE) {
+    const { data, error } = await db.from('monitor_checks').select('result_status,status_code,response_ms,error_message,checked_at')
+      .eq('monitor_id', monitorId).gte('checked_at', since).order('checked_at', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) throw error
+    all.push(...(data || []))
+    if (!data || data.length < PAGE_SIZE) break
+  }
+  return all
+}
+
+function relativeTime(value) {
+  if (!value) return 'jamais vérifié'
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000))
+  if (seconds < 5) return 'à l’instant'
+  if (seconds < 60) return `il y a ${seconds} s`
+  if (seconds < 3600) return `il y a ${Math.round(seconds / 60)} min`
+  return `il y a ${Math.round(seconds / 3600)} h`
+}
+function intervalLabel(seconds) {
+  return Object.entries(intervals).find(([, value]) => value === Number(seconds))?.[0] || `${Math.round(Number(seconds) / 60)} min`
+}
+
+async function monitorPayload(row, db) {
+  const since = new Date(Date.now() - 30 * 86400000).toISOString()
+  const checks = await readChecks(db, row.id, since)
+  const total = checks.length
+  const successes = checks.filter((check) => check.result_status === 'up').length
+  const responses = checks.filter((check) => check.response_ms != null).map((check) => Number(check.response_ms))
+  return { id: Number(row.id), name: row.name, url: row.url, type: row.monitor_type, status: row.status,
+    uptime: total ? Number((successes / total * 100).toFixed(2)) : 0,
+    response: responses.length ? Math.round(responses.reduce((sum, value) => sum + value, 0) / responses.length) : 0,
+    lastCheck: relativeTime(row.last_check_at), lastCheckAt: row.last_check_at,
+    interval: intervalLabel(row.interval_seconds), intervalSeconds: Number(row.interval_seconds),
+    location: 'Serveur Mzouti', tags: [row.monitor_type], chart: checks.slice(-120).map((check) => check.result_status === 'up' ? 100 : 12) }
+}
+
+async function getOwnedMonitor(db, id) {
+  if (!/^\d+$/.test(String(id))) return null
+  const { data, error } = await db.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at,created_at')
+    .eq('id', Number(id)).maybeSingle()
+  if (error) throw error
+  return data
+}
+async function listOwnedMonitors(db) {
+  const { data, error } = await db.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at,created_at')
+    .order('created_at', { ascending: false }).limit(MAX_MONITORS)
+  if (error) throw error
+  return Promise.all((data || []).map((row) => monitorPayload(row, db)))
+}
+
+async function checkDueMonitors(force = false) {
+  if (!adminClient) throw new Error('SUPABASE_SERVICE_ROLE_KEY manquante : le robot automatique est désactivé.')
+  const { data: rows, error } = await adminClient.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,last_check_at')
+    .neq('status', 'paused').order('id', { ascending: true }).limit(MAX_MONITORS)
+  if (error) throw error
   const now = Date.now()
-  const due = force ? rows : rows.filter((monitor) => !monitor.last_check_at || now - new Date(monitor.last_check_at).getTime() >= Number(monitor.interval_seconds) * 1000)
+  const due = (rows || []).filter((monitor) => force || !monitor.last_check_at ||
+    now - new Date(monitor.last_check_at).getTime() >= Number(monitor.interval_seconds) * 1000)
   const results = []
-  for (const monitor of due) results.push({ id: Number(monitor.id), ...(await executeCheck(monitor, authHeader)) })
-  return { checked: results.length, results }
+  for (let i = 0; i < due.length; i += 8) {
+    const batch = due.slice(i, i + 8)
+    results.push(...await Promise.all(batch.map(async (monitor) => ({ id: Number(monitor.id), ...(await executeCheck(monitor, adminClient)) }))))
+  }
+  return { checked: results.filter((item) => !item.skipped).length, results, checkedAt: new Date().toISOString() }
 }
 
 app.get('/api/health', async (_req, res) => {
-  try { await supabaseRequest('monitors', { authHeader: serviceAuthHeader(), query: { select: 'id', limit: 1 } }); res.json({ ok: true, database: 'supabase', auth: 'enabled' }) }
-  catch (error) { res.status(503).json({ ok: false, database: 'unavailable', error: error.message }) }
+  try {
+    const { error } = await (adminClient || publicClient).from('monitors').select('id').limit(1)
+    if (error) throw error
+    res.json({ ok: true, service: 'Mzouti Uptime', database: 'connected', backgroundMonitoring: Boolean(adminClient), time: new Date().toISOString() })
+  } catch (error) {
+    console.error('Health check failed:', error.message)
+    res.status(503).json({ ok: false, service: 'Mzouti Uptime', database: 'unavailable' })
+  }
 })
-app.use('/api/monitors', requireAuth)
-app.get('/api/monitors', async (req, res) => { try { res.json({ monitors: await listMonitors(req.authHeader) }) } catch (error) { res.status(503).json({ error: 'Supabase unavailable', detail: error.message }) } })
+
+app.use('/api/monitors', authenticate)
+app.get('/api/monitors', async (req, res) => {
+  try { res.json({ monitors: await listOwnedMonitors(req.db) }) } catch (error) { fail(res, error) }
+})
 app.post('/api/monitors', async (req, res) => {
   try {
-    const name = String(req.body?.name || '').trim(); const type = String(req.body?.type || 'HTTP').toUpperCase(); const url = normalizeUrl(req.body?.url, type); const interval = intervalSeconds[req.body?.interval] || 300
-    if (!name || name.length > 120) return res.status(400).json({ error: 'Name is required and must be under 120 characters' })
-    const created = await supabaseRequest('monitors', { method: 'POST', authHeader: req.authHeader, headers: { Prefer: 'return=representation' }, body: { name, url, monitor_type: type, interval_seconds: interval } })
-    const monitor = created[0]; await executeCheck(monitor, req.authHeader); res.status(201).json({ monitor: await monitorPayload(await findMonitor(monitor.id, req.authHeader), req.authHeader) })
-  } catch (error) { res.status(400).json({ error: error.message }) }
+    const name = String(req.body?.name || '').trim()
+    const type = String(req.body?.type || 'HTTP').toUpperCase()
+    const { raw: url } = normalizeTarget(req.body?.url, type)
+    const interval = intervals[req.body?.interval] || 300
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Le nom doit contenir entre 1 et 120 caractères.' })
+    if (!adminClient) return res.status(503).json({ error: 'Le service de contrôle serveur n’est pas configuré.' })
+    const { data: created, error } = await req.db.from('monitors').insert({ name, url, monitor_type: type, interval_seconds: interval, status: 'up' })
+      .select('id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at,created_at').single()
+    if (error) throw error
+    await executeCheck(created, adminClient)
+    const fresh = await getOwnedMonitor(req.db, created.id)
+    res.status(201).json({ monitor: await monitorPayload(fresh, req.db) })
+  } catch (error) { fail(res, error, error?.code === '23505' ? 409 : error?.code ? 503 : 400) }
 })
-app.post('/api/monitors/check-all', async (req, res) => { try { res.json(await checkDueMonitors(Boolean(req.query.force), req.authHeader)) } catch (error) { res.status(503).json({ error: error.message }) } })
-app.post('/api/monitors/:id/check', async (req, res) => { try { const monitor = await findMonitor(req.params.id, req.authHeader); if (!monitor) return res.status(404).json({ error: 'Monitor not found' }); const result = await executeCheck(monitor, req.authHeader); res.json({ result, monitor: await monitorPayload(await findMonitor(monitor.id, req.authHeader), req.authHeader) }) } catch (error) { res.status(503).json({ error: error.message }) } })
-app.get('/api/monitors/:id/checks', async (req, res) => { try { const rows = await supabaseRequest('monitor_checks', { authHeader: req.authHeader, query: { select: 'result_status,status_code,response_ms,error_message,checked_at', monitor_id: `eq.${req.params.id}`, order: 'checked_at.desc', limit: 100 } }); res.json({ checks: rows.map((row) => ({ status: row.result_status, statusCode: row.status_code, responseMs: row.response_ms, error: row.error_message, checkedAt: serializeDate(row.checked_at) })) }) } catch (error) { res.status(503).json({ error: error.message }) } })
-app.delete('/api/monitors/:id', async (req, res) => { try { await supabaseRequest('monitors', { method: 'DELETE', authHeader: req.authHeader, query: { id: `eq.${req.params.id}` } }); res.status(204).end() } catch (error) { res.status(503).json({ error: error.message }) } })
-app.post('/api/scheduled/checks', async (_req, res) => { try { res.json(await checkDueMonitors(false)) } catch (error) { res.status(503).json({ error: error.message }) } })
+app.patch('/api/monitors/:id', async (req, res) => {
+  try {
+    const current = await getOwnedMonitor(req.db, req.params.id)
+    if (!current) return res.status(404).json({ error: 'Moniteur introuvable.' })
+    const changes = {}
+    if (req.body?.name !== undefined) {
+      const name = String(req.body.name).trim()
+      if (!name || name.length > 120) return res.status(400).json({ error: 'Le nom doit contenir entre 1 et 120 caractères.' })
+      changes.name = name
+    }
+    if (req.body?.url !== undefined || req.body?.type !== undefined) {
+      const type = String(req.body?.type || current.monitor_type).toUpperCase()
+      const { raw } = normalizeTarget(req.body?.url ?? current.url, type)
+      changes.url = raw
+      changes.monitor_type = type
+    }
+    if (req.body?.interval !== undefined) {
+      if (!intervals[req.body.interval]) return res.status(400).json({ error: 'Fréquence invalide.' })
+      changes.interval_seconds = intervals[req.body.interval]
+    }
+    if (!Object.keys(changes).length) return res.status(400).json({ error: 'Aucune modification reçue.' })
+    changes.updated_at = new Date().toISOString()
+    const { error } = await req.db.from('monitors').update(changes).eq('id', current.id)
+    if (error) throw error
+    const updated = await getOwnedMonitor(req.db, current.id)
+    res.json({ monitor: await monitorPayload(updated, req.db) })
+  } catch (error) { fail(res, error, error?.code ? 503 : 400) }
+})
+app.post('/api/monitors/:id/pause', async (req, res) => {
+  try {
+    const monitor = await getOwnedMonitor(req.db, req.params.id)
+    if (!monitor) return res.status(404).json({ error: 'Moniteur introuvable.' })
+    const { error } = await req.db.from('monitors').update({ status: 'paused', updated_at: new Date().toISOString() }).eq('id', monitor.id)
+    if (error) throw error
+    res.json({ success: true, status: 'paused' })
+  } catch (error) { fail(res, error) }
+})
+app.post('/api/monitors/:id/resume', async (req, res) => {
+  try {
+    const monitor = await getOwnedMonitor(req.db, req.params.id)
+    if (!monitor) return res.status(404).json({ error: 'Moniteur introuvable.' })
+    if (!adminClient) return res.status(503).json({ error: 'Service de contrôle non configuré.' })
+    const resumed = { ...monitor, status: 'up', last_check_at: null }
+    const { error } = await req.db.from('monitors').update({ status: 'up', last_check_at: null, updated_at: new Date().toISOString() }).eq('id', monitor.id)
+    if (error) throw error
+    const result = await executeCheck(resumed, adminClient)
+    const fresh = await getOwnedMonitor(req.db, monitor.id)
+    res.json({ success: true, result, monitor: await monitorPayload(fresh, req.db) })
+  } catch (error) { fail(res, error) }
+})
+app.post('/api/monitors/check-all', async (req, res) => {
+  try {
+    const { data: rows, error } = await req.db.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,last_check_at').neq('status', 'paused').limit(MAX_MONITORS)
+    if (error) throw error
+    const force = req.query.force === '1' || req.query.force === 'true'
+    const due = (rows || []).filter((row) => force || !row.last_check_at || Date.now() - new Date(row.last_check_at).getTime() >= Number(row.interval_seconds) * 1000)
+    const results = []
+    for (const monitor of due) results.push({ id: Number(monitor.id), ...(await executeCheck(monitor, adminClient)) })
+    res.json({ checked: results.filter((item) => !item.skipped).length, results })
+  } catch (error) { fail(res, error) }
+})
+app.post('/api/monitors/:id/check', async (req, res) => {
+  try {
+    const monitor = await getOwnedMonitor(req.db, req.params.id)
+    if (!monitor) return res.status(404).json({ error: 'Moniteur introuvable.' })
+    if (monitor.status === 'paused') return res.status(409).json({ error: 'Ce moniteur est en pause.' })
+    if (!adminClient) return res.status(503).json({ error: 'Service de contrôle non configuré.' })
+    const result = await executeCheck(monitor, adminClient)
+    const fresh = await getOwnedMonitor(req.db, monitor.id)
+    res.json({ result, monitor: await monitorPayload(fresh, req.db) })
+  } catch (error) { fail(res, error) }
+})
+app.get('/api/monitors/:id/checks', async (req, res) => {
+  try {
+    const monitor = await getOwnedMonitor(req.db, req.params.id)
+    if (!monitor) return res.status(404).json({ error: 'Moniteur introuvable.' })
+    const rows = await readChecks(req.db, monitor.id, new Date(Date.now() - 30 * 86400000).toISOString())
+    res.json({ checks: rows.reverse().map((row) => ({ status: row.result_status, statusCode: row.status_code, responseMs: row.response_ms, error: row.error_message, checkedAt: row.checked_at })) })
+  } catch (error) { fail(res, error) }
+})
+app.delete('/api/monitors/:id', async (req, res) => {
+  try {
+    const monitor = await getOwnedMonitor(req.db, req.params.id)
+    if (!monitor) return res.status(404).json({ error: 'Moniteur introuvable.' })
+    const { error } = await req.db.from('monitors').delete().eq('id', monitor.id)
+    if (error) throw error
+    res.status(204).end()
+  } catch (error) { fail(res, error) }
+})
+app.post('/api/scheduled/checks', async (req, res) => {
+  if (!CRON_SECRET || !safeEqual(req.headers['x-cron-secret'], CRON_SECRET)) return res.status(401).json({ error: 'Accès refusé.' })
+  try { res.json(await checkDueMonitors(false)) } catch (error) { fail(res, error) }
+})
 
 if (isDev) {
-  const vite = await createViteServer({ server: { middlewareMode: true, host: '0.0.0.0' }, appType: 'spa' }); app.use(vite.middlewares)
+  const vite = await createViteServer({ server: { middlewareMode: true, host: '0.0.0.0' }, appType: 'spa' })
+  app.use(vite.middlewares)
 } else {
-  app.use(express.static(path.join(__dirname, 'dist'))); app.use((req, res, next) => { if (req.method === 'GET' && !req.path.startsWith('/api/')) return res.sendFile(path.join(__dirname, 'dist', 'index.html')); next() })
+  app.use(express.static(path.join(__dirname, 'dist'), { etag: true, maxAge: '1h' }))
+  app.get(/^(?!\/api\/).*/, (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next()
+    res.setHeader('Cache-Control', 'no-cache')
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'))
+  })
+  app.use((req, res) => res.status(404).json({ error: 'Route introuvable.' }))
 }
-app.listen(port, '0.0.0.0', () => console.log(`Mzouti Uptime listening on ${port} with Supabase Auth (${isDev ? 'development' : 'production'})`))
-setInterval(() => { checkDueMonitors(false, serviceAuthHeader()).catch((error) => console.error('Background monitoring cycle failed:', error.message)) }, 30000).unref()
+app.use((error, _req, res, _next) => {
+  console.error('Unhandled request error:', error?.message || error)
+  if (!res.headersSent) res.status(500).json({ error: 'Erreur interne du serveur.' })
+})
+
+const server = app.listen(port, '0.0.0.0', () => {
+  console.log(`Mzouti Uptime listening on port ${port}`)
+  console.log(adminClient ? 'Background monitoring enabled.' : 'Background monitoring disabled: SUPABASE_SERVICE_ROLE_KEY is missing.')
+})
+if (adminClient) {
+  const timer = setInterval(() => checkDueMonitors(false).catch((error) => console.error('Background monitoring cycle failed:', error.message)), CHECK_INTERVAL_MS)
+  timer.unref()
+}
+function shutdown() {
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(1), 10000).unref()
+}
+process.once('SIGTERM', shutdown)
+process.once('SIGINT', shutdown)
