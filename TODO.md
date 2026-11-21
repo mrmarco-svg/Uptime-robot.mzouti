@@ -4,6 +4,7 @@
 - [x] Créer un site web de monitoring de disponibilité inspiré d’UptimeRobot avec un tableau de bord responsive.
 - [x] Ne pas afficher de moniteurs, métriques ou incidents fictifs : le tableau démarre vide et chaque résultat vient de la base et d’un contrôle réseau réel.
 - [x] Afficher clairement la marque « by Mzouti - All Right reserved » dans l’interface.
+- [x] Protéger l’accès avec Supabase Auth : inscription, connexion, session persistante et déconnexion.
 
 ## Contrôles et persistance
 - [x] Permettre la création de moniteurs HTTP, PING et PORT avec URL ou hôte, fréquence et premier contrôle immédiat.
@@ -13,6 +14,8 @@
 - [x] Exposer un endpoint de santé et un endpoint de contrôle groupé utilisables par le serveur et l’actualisation du dashboard.
 - [x] Exécuter automatiquement côté serveur les contrôles arrivés à échéance toutes les 30 secondes, même sans dashboard ouvert.
 - [x] Préparer le callback sécurisé `/api/scheduled/checks` pour les contrôles périodiques après publication.
+- [x] Associer chaque moniteur à `auth.uid()` et isoler les données avec les policies RLS Supabase.
+- [x] Utiliser la clé `service_role` uniquement côté serveur pour les contrôles automatiques en arrière-plan.
 
 ## Interface et navigation
 - [x] Fournir une navigation latérale responsive donnant accès à la vue d’ensemble et aux moniteurs.

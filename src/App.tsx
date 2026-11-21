@@ -1,4 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
+import type { Session } from '@supabase/supabase-js'
+import { supabase } from './lib/supabase'
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -75,7 +77,7 @@ function StatusBadge({ status, compact = false }: { status: Status; compact?: bo
   return <span className={`status-badge status-${status} ${compact ? 'status-compact' : ''}`}><Icon size={compact ? 13 : 14} strokeWidth={2.2} />{!compact && labels[status]}</span>
 }
 
-function App() {
+function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
   const [section, setSection] = useState<Section>(() => window.location.pathname.startsWith('/monitors') ? 'monitors' : 'overview')
   const [monitors, setMonitors] = useState<Monitor[]>([])
   const [query, setQuery] = useState('')
@@ -111,7 +113,7 @@ function App() {
   const loadMonitors = async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const response = await fetch('/api/monitors')
+      const response = await apiFetch('/api/monitors')
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Impossible de charger les moniteurs')
       setMonitors(payload.monitors)
@@ -127,7 +129,7 @@ function App() {
   const runChecks = async (force = false) => {
     setIsRefreshing(true)
     try {
-      const response = await fetch(`/api/monitors/check-all${force ? '?force=1' : ''}`, { method: 'POST' })
+      const response = await apiFetch(`/api/monitors/check-all${force ? '?force=1' : ''}`, { method: 'POST' })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Le contrôle n’a pas pu être exécuté')
       await loadMonitors(true)
@@ -139,11 +141,17 @@ function App() {
     }
   }
 
+  const apiFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers)
+    headers.set('Authorization', `Bearer ${session.access_token}`)
+    return fetch(input, { ...init, headers })
+  }
+
   useEffect(() => {
     void loadMonitors()
     const interval = window.setInterval(() => { void runChecks() }, 30000)
     return () => window.clearInterval(interval)
-  }, [])
+  }, [session.access_token])
 
   useEffect(() => {
     const syncSection = () => setSection(window.location.pathname.startsWith('/monitors') ? 'monitors' : 'overview')
@@ -160,7 +168,7 @@ function App() {
   const handleAdd = async (event: FormEvent) => {
     event.preventDefault()
     try {
-      const response = await fetch('/api/monitors', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(form) })
+      const response = await apiFetch('/api/monitors', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(form) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Impossible de créer le moniteur')
       setMonitors((current) => [payload.monitor, ...current])
@@ -176,7 +184,7 @@ function App() {
   const removeMonitor = async (id: number) => {
     if (!window.confirm('Supprimer ce moniteur et son historique de contrôles ?')) return
     try {
-      const response = await fetch(`/api/monitors/${id}`, { method: 'DELETE' })
+      const response = await apiFetch(`/api/monitors/${id}`, { method: 'DELETE' })
       if (!response.ok) throw new Error('Impossible de supprimer ce moniteur')
       setMonitors((current) => current.filter((monitor) => monitor.id !== id))
       setSelectedId(null)
@@ -204,7 +212,7 @@ function App() {
       </nav>
       <div className="nav-label nav-label-spaced">Configuration</div>
       <nav className="main-nav"><button className="nav-item" onClick={() => setToast('Les notifications seront disponibles prochainement')}><Bell size={18} /> Notifications</button><button className="nav-item" onClick={() => setToast('Paramètres de workspace')}><Settings2 size={18} /> Paramètres</button></nav>
-      <div className="sidebar-bottom"><div className="upgrade-card"><div className="upgrade-icon"><Sparkles size={16} /></div><strong>Plus de visibilité</strong><p>Ajoutez des contrôles depuis plusieurs régions avec le plan Pro.</p><button onClick={() => setToast('Votre espace est prêt pour plusieurs régions')}>Voir le plan <ArrowUpRight size={14} /></button></div><div className="sidebar-user"><div className="user-avatar">M</div><div><strong>Mzouti</strong><small>Administrateur</small></div><MoreHorizontal size={17} className="user-more" /></div></div>
+      <div className="sidebar-bottom"><div className="upgrade-card"><div className="upgrade-icon"><Sparkles size={16} /></div><strong>Plus de visibilité</strong><p>Ajoutez des contrôles depuis plusieurs régions avec le plan Pro.</p><button onClick={() => setToast('Votre espace est prêt pour plusieurs régions')}>Voir le plan <ArrowUpRight size={14} /></button></div><div className="sidebar-user"><div className="user-avatar">{(session.user.email?.[0] || 'M').toUpperCase()}</div><div><strong>{session.user.email || 'Utilisateur'}</strong><small>Compte sécurisé</small></div><button className="sign-out-button" onClick={onSignOut}>Sortir</button></div></div>
     </aside>
 
     <div className="page-shell">
@@ -233,6 +241,54 @@ function MonitorTable({ monitors, onSelect, empty }: { monitors: Monitor[]; onSe
 
 function DetailPanel({ monitor, onClose, onToast, onDelete }: { monitor: Monitor; onClose: () => void; onToast: (message: string) => void; onDelete: () => void }) {
   return <div className="detail-overlay" onClick={onClose}><aside className="detail-panel" onClick={(event) => event.stopPropagation()}><div className="detail-header"><button className="detail-back" onClick={onClose}><ChevronRight size={17} /> Fermer</button><button className="icon-button detail-more" onClick={() => onToast('Options du moniteur')}><MoreHorizontal size={18} /></button></div><div className="detail-hero"><div className={`detail-symbol detail-symbol-${monitor.status}`}><Globe2 size={23} /></div><div><div className="detail-eyebrow">{monitor.type} MONITOR</div><h2>{monitor.name}</h2><a href={monitor.url} onClick={(event) => event.preventDefault()}>{monitor.url} <ExternalLink size={12} /></a></div></div><StatusBadge status={monitor.status} /><div className="detail-metrics"><div><span>Uptime (30 jours)</span><strong className={monitor.status === 'down' ? 'metric-red' : ''}>{monitor.uptime ? `${monitor.uptime.toFixed(2)}%` : '—'}</strong></div><div><span>Réponse moyenne</span><strong>{monitor.response || '—'}<small>{monitor.response ? ' ms' : ''}</small></strong></div><div><span>Dernière vérification</span><strong className="metric-small">{monitor.lastCheck}</strong></div></div><div className="detail-section"><div className="detail-section-title"><h3>Historique de disponibilité</h3><span>Derniers contrôles</span></div><div className="detail-chart"><Chart values={monitor.chart} color={monitor.status === 'down' ? '#ee6f70' : '#6575f2'} fill={monitor.status === 'down' ? '#ee6f70' : '#6575f2'} /></div><div className="detail-chart-labels"><span>Plus ancien</span><span>Plus récent</span></div></div><div className="detail-section detail-config"><div className="detail-section-title"><h3>Configuration</h3><button onClick={() => onToast('Édition de configuration bientôt disponible')}><Settings2 size={14} /> Modifier</button></div><div className="config-list"><div><span><Zap size={14} /> Fréquence</span><strong>Chaque {monitor.interval}</strong></div><div><span><Server size={14} /> Région de contrôle</span><strong>{monitor.location}</strong></div><div><span><Bell size={14} /> Notifications</span><strong className="config-enabled"><Check size={13} /> Activées</strong></div></div></div><div className="detail-footer-note"><CircleHelp size={15} /> Contrôles effectués depuis le serveur Mzouti.</div><button className="delete-monitor-button" onClick={onDelete}>Supprimer ce moniteur</button></aside></div>
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState<'login' | 'signup'>('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [pending, setPending] = useState(false)
+  const [resetPending, setResetPending] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    setPending(true); setError(''); setMessage('')
+    const result = mode === 'login'
+      ? await supabase.auth.signInWithPassword({ email, password })
+      : await supabase.auth.signUp({ email, password })
+    if (result.error) setError(result.error.message)
+    else if (mode === 'signup' && !result.data.session) setMessage('Compte créé. Vérifie ton adresse email pour activer la connexion.')
+    setPending(false)
+  }
+
+  const resetPassword = async () => {
+    if (!email) return setError('Indique ton email pour recevoir le lien de réinitialisation.')
+    setResetPending(true); setError(''); setMessage('')
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin })
+    if (resetError) setError(resetError.message)
+    else setMessage('Un lien de réinitialisation vient d’être envoyé à ton adresse email.')
+    setResetPending(false)
+  }
+
+  return <div className="auth-shell"><div className="auth-card"><div className="auth-brand"><div className="brand-mark"><span /></div><div><div className="brand-name">mzouti<span>uptime</span></div><div className="brand-caption">simple. fiable. visible.</div></div></div><div className="auth-kicker"><ShieldCheck size={14} /> ESPACE SÉCURISÉ</div><h1>{mode === 'login' ? 'Bon retour.' : 'Créer ton espace.'}</h1><p className="auth-lead">Surveille tes sites avec des contrôles réels, associés à ton compte.</p><form onSubmit={submit} className="auth-form"><label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="toi@exemple.com" required /></label><label>Mot de passe<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="6 caractères minimum" required /></label>{mode === 'login' && <button type="button" className="forgot-password" onClick={() => void resetPassword()} disabled={resetPending}>{resetPending ? 'Envoi...' : 'Mot de passe oublié ?'}</button>}{error && <div className="auth-message auth-error"><AlertTriangle size={15} />{error}</div>}{message && <div className="auth-message auth-success"><CheckCircle2 size={15} />{message}</div>}<button className="button button-primary auth-submit" disabled={pending || resetPending}>{pending ? <RefreshCw className="spin-icon" size={16} /> : <ShieldCheck size={16} />}{pending ? 'Connexion...' : mode === 'login' ? 'Se connecter' : 'Créer mon compte'}</button></form><button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setMessage('') }}>{mode === 'login' ? 'Créer un compte' : 'J’ai déjà un compte'}</button><div className="auth-note">Tes moniteurs sont privés et protégés par les règles RLS de Supabase.</div></div></div>
+}
+
+function App() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+
+  useEffect(() => {
+    let mounted = true
+    void supabase.auth.getSession().then(({ data }) => { if (mounted) { setSession(data.session); setAuthReady(true) } })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); setAuthReady(true) })
+    return () => { mounted = false; listener.subscription.unsubscribe() }
+  }, [])
+
+  if (!authReady) return <div className="auth-loading"><RefreshCw className="spin-icon" size={22} /> Vérification de la session...</div>
+  if (!session) return <AuthScreen />
+  return <Dashboard session={session} onSignOut={() => { void supabase.auth.signOut() }} />
 }
 
 export default App
