@@ -29,3 +29,18 @@
 - [x] Fournir une vue détaillée avec état actuel, métriques, configuration et historique des contrôles enregistrés.
 - [x] Permettre l’actualisation manuelle, l’actualisation périodique du dashboard et la suppression d’un moniteur.
 - [x] Afficher un état vide explicite tant qu’aucun moniteur n’a été configuré.
+
+
+## Plans, paiements et incidents — patch 2026-11-22
+- [x] Ajouter des plafonds serveur Free/Starter/Pro/Business et bloquer les nouvelles créations au-delà du quota.
+- [x] Conserver les moniteurs existants lors d'une expiration ou d'un downgrade.
+- [x] Ajouter les abonnements et les demandes de paiement NatCash/Meru en attente de vérification manuelle.
+- [x] Réserver l'approbation des paiements aux UUID administrateurs configurés côté serveur.
+- [x] Ajouter un historique persistant des incidents et leur résolution.
+- [x] Calculer l'uptime selon la durée couverte par les contrôles.
+- [x] Ajouter les notes d'installation et de configuration dans PATCH-NOTES.md.
+- [ ] Définir et confirmer les prix officiels mensuels et annuels.
+- [ ] Ajouter les documentations/identifiants API NatCash ou Meru pour une éventuelle vérification automatique.
+- [ ] Ajouter un panneau graphique d'administration des paiements.
+- [ ] Configurer un fournisseur email et les préférences de notifications.
+- [ ] Exécuter la migration SQL dans Supabase puis vérifier le déploiement réel.

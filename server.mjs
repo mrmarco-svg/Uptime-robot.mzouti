@@ -23,7 +23,15 @@ const CRON_SECRET = process.env.CRON_SECRET || ''
 const CHECK_INTERVAL_MS = 30000
 const CHECK_TIMEOUT_MS = 12000
 const PAGE_SIZE = 1000
-const MAX_MONITORS = 200
+const MAX_MONITORS = 10000
+const PLAN_LIMITS = Object.freeze({
+  free: { label: 'Free', monitors: 5, historyDays: 7, minInterval: 300 },
+  starter: { label: 'Starter', monitors: 20, historyDays: 30, minInterval: 60 },
+  pro: { label: 'Pro', monitors: 50, historyDays: 90, minInterval: 60 },
+  business: { label: 'Business', monitors: 150, historyDays: 365, minInterval: 60 },
+})
+const ADMIN_USER_IDS = new Set(String(process.env.ADMIN_USER_IDS || '').split(',').map((v) => v.trim()).filter(Boolean))
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'marcododji284@gmail.com'
 const intervals = { '1 min': 60, '5 min': 300, '10 min': 600, '15 min': 900 }
 const allowedTypes = new Set(['HTTP', 'PING', 'PORT'])
 const inFlight = new Set()
@@ -119,21 +127,25 @@ function normalizeTarget(value, type) {
 function isPublicAddress(address) {
   const version = isIP(address)
   if (version === 4) {
-    const [a, b] = address.split('.').map(Number)
+    const [a, b, c] = address.split('.').map(Number)
     if (a === 0 || a === 10 || a === 127 || a >= 224) return false
     if (a === 100 && b >= 64 && b <= 127) return false
     if (a === 169 && b === 254) return false
     if (a === 172 && b >= 16 && b <= 31) return false
     if (a === 192 && (b === 0 || b === 168)) return false
-    if (a === 192 && b === 88) return false
-    if (a === 198 && (b === 18 || b === 19 || b === 51)) return false
-    if (a === 203 && b === 0) return false
+    if (a === 192 && b === 88 && c === 99) return false
+    if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false
+    if (a === 203 && b === 0 && c === 113) return false
     return true
   }
   if (version === 6) {
     const value = address.toLowerCase()
     if (value.startsWith('::ffff:')) return isPublicAddress(value.slice(7))
-    return value.startsWith('2') || value.startsWith('3')
+    // Only globally-routable unicast 2000::/3; reject documentation and special-use blocks.
+    const first = parseInt(value.split(':')[0] || '0', 16)
+    if (!Number.isFinite(first) || first < 0x2000 || first > 0x3fff) return false
+    if (value.startsWith('2001:db8:') || value.startsWith('2001:10:') || value.startsWith('2001:20:')) return false
+    return true
   }
   return false
 }
@@ -255,14 +267,23 @@ function intervalLabel(seconds) {
   return Object.entries(intervals).find(([, value]) => value === Number(seconds))?.[0] || `${Math.round(Number(seconds) / 60)} min`
 }
 
-async function monitorPayload(row, db) {
-  const since = new Date(Date.now() - 30 * 86400000).toISOString()
+async function monitorPayload(row, db, historyDays = 30) {
+  const since = new Date(Date.now() - historyDays * 86400000).toISOString()
   const checks = await readChecks(db, row.id, since)
-  const total = checks.length
-  const successes = checks.filter((check) => check.result_status === 'up').length
   const responses = checks.filter((check) => check.response_ms != null).map((check) => Number(check.response_ms))
+  const now = Date.now()
+  let upMs = 0
+  let measuredMs = 0
+  for (let index = 0; index < checks.length; index += 1) {
+    const check = checks[index]
+    const from = Math.max(new Date(since).getTime(), new Date(check.checked_at).getTime())
+    const next = checks[index + 1] ? new Date(checks[index + 1].checked_at).getTime() : Math.min(now, from + Number(row.interval_seconds || 300) * 1000)
+    const duration = Math.max(0, next - from)
+    measuredMs += duration
+    if (check.result_status === 'up') upMs += duration
+  }
   return { id: Number(row.id), name: row.name, url: row.url, type: row.monitor_type, status: row.status,
-    uptime: total ? Number((successes / total * 100).toFixed(2)) : 0,
+    uptime: measuredMs ? Number((upMs / measuredMs * 100).toFixed(2)) : 0,
     response: responses.length ? Math.round(responses.reduce((sum, value) => sum + value, 0) / responses.length) : 0,
     lastCheck: relativeTime(row.last_check_at), lastCheckAt: row.last_check_at,
     interval: intervalLabel(row.interval_seconds), intervalSeconds: Number(row.interval_seconds),
@@ -278,16 +299,23 @@ async function getOwnedMonitor(db, id) {
 }
 async function listOwnedMonitors(db) {
   const { data, error } = await db.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at,created_at')
-    .order('created_at', { ascending: false }).limit(MAX_MONITORS)
+    .order('created_at', { ascending: false })
   if (error) throw error
-  return Promise.all((data || []).map((row) => monitorPayload(row, db)))
+  const { data: subscription } = await db.from('subscriptions').select('plan_code').maybeSingle()
+  const historyDays = PLAN_LIMITS[subscription?.plan_code || 'free']?.historyDays || 7
+  return Promise.all((data || []).map((row) => monitorPayload(row, db, historyDays)))
 }
 
 async function checkDueMonitors(force = false) {
   if (!adminClient) throw new Error('SUPABASE_SERVICE_ROLE_KEY manquante : le robot automatique est désactivé.')
-  const { data: rows, error } = await adminClient.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,last_check_at')
-    .neq('status', 'paused').order('id', { ascending: true }).limit(MAX_MONITORS)
-  if (error) throw error
+  const rows = []
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await adminClient.from('monitors').select('id,name,url,monitor_type,interval_seconds,status,last_check_at')
+      .neq('status', 'paused').order('id', { ascending: true }).range(offset, offset + PAGE_SIZE - 1)
+    if (error) throw error
+    rows.push(...(data || []))
+    if (!data || data.length < PAGE_SIZE) break
+  }
   const now = Date.now()
   const due = (rows || []).filter((monitor) => force || !monitor.last_check_at ||
     now - new Date(monitor.last_check_at).getTime() >= Number(monitor.interval_seconds) * 1000)
@@ -298,6 +326,101 @@ async function checkDueMonitors(force = false) {
   }
   return { checked: results.filter((item) => !item.skipped).length, results, checkedAt: new Date().toISOString() }
 }
+
+
+async function getSubscription(userId) {
+  if (!adminClient) throw new Error('Service de facturation non configuré.')
+  const { data, error } = await adminClient.from('subscriptions').select('*').eq('user_id', userId).maybeSingle()
+  if (error) throw error
+  if (data) {
+    const expired = data.plan_code !== 'free' && data.status === 'active' && data.current_period_end && new Date(data.current_period_end) <= new Date()
+    if (expired) {
+      const { data: downgraded, error: updateError } = await adminClient.from('subscriptions')
+        .update({ plan_code: 'free', status: 'expired', current_period_start: null, current_period_end: null, updated_at: new Date().toISOString() })
+        .eq('user_id', userId).select('*').single()
+      if (updateError) throw updateError
+      return downgraded
+    }
+    return data
+  }
+  const { error: createError } = await adminClient.from('subscriptions').upsert({
+    user_id: userId, plan_code: 'free', status: 'active',
+  }, { onConflict: 'user_id', ignoreDuplicates: true })
+  if (createError) throw createError
+  const { data: created, error: readError } = await adminClient.from('subscriptions').select('*').eq('user_id', userId).single()
+  if (readError) throw readError
+  return created
+}
+async function accountPayload(userId) {
+  const subscription = await getSubscription(userId)
+  const plan = PLAN_LIMITS[subscription.plan_code] || PLAN_LIMITS.free
+  const { count, error } = await adminClient.from('monitors').select('id', { count: 'exact', head: true }).eq('user_id', userId)
+  if (error) throw error
+  const { data: payments, error: paymentError } = await adminClient.from('payment_requests')
+    .select('id,provider,billing_period,amount,currency,reference,status,created_at,reviewed_at,admin_note')
+    .eq('user_id', userId).order('created_at', { ascending: false }).limit(10)
+  if (paymentError) throw paymentError
+  return {
+    email: SUPPORT_EMAIL,
+    subscription: { planCode: subscription.plan_code, status: subscription.status, periodEnd: subscription.current_period_end, ...plan },
+    usage: { monitors: count || 0, limit: plan.monitors, remaining: Math.max(0, plan.monitors - (count || 0)) },
+    plans: Object.entries(PLAN_LIMITS).map(([code, value]) => ({ code, ...value })),
+    paymentMethods: { natcash: { recipient: 'Mompremier Marc', phone: '+50941131299' }, meru: { tag: '$mzouti' } },
+    payments: payments || [],
+  }
+}
+app.get('/api/account', authenticate, async (req, res) => {
+  try { res.json(await accountPayload(req.user.id)) } catch (error) { fail(res, error) }
+})
+app.post('/api/payment-requests', authenticate, async (req, res) => {
+  try {
+    if (!adminClient) return res.status(503).json({ error: 'La facturation serveur n’est pas configurée.' })
+    const provider = String(req.body?.provider || '').toLowerCase()
+    const period = String(req.body?.billingPeriod || '')
+    const planCode = String(req.body?.planCode || '').toLowerCase()
+    const reference = String(req.body?.reference || '').trim()
+    const amount = Number(req.body?.amount)
+    const currency = String(req.body?.currency || 'HTG').toUpperCase()
+    const proofUrl = String(req.body?.proofUrl || '').trim()
+    if (!['natcash', 'meru'].includes(provider)) return res.status(400).json({ error: 'Moyen de paiement invalide.' })
+    if (!['monthly', 'annual'].includes(period)) return res.status(400).json({ error: 'Période invalide.' })
+    if (!PLAN_LIMITS[planCode] || planCode === 'free') return res.status(400).json({ error: 'Forfait invalide.' })
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) return res.status(400).json({ error: 'Montant invalide.' })
+    if (!reference || reference.length > 160) return res.status(400).json({ error: 'La référence de transaction est obligatoire.' })
+    if (proofUrl && (!/^https:\/\/\S+$/i.test(proofUrl) || proofUrl.length > 1000)) return res.status(400).json({ error: 'Le lien de preuve doit être une URL HTTPS valide.' })
+    const { data, error } = await adminClient.from('payment_requests').insert({
+      user_id: req.user.id, provider, plan_code: planCode, billing_period: period,
+      amount, currency, reference, proof_url: proofUrl || null, status: 'pending',
+    }).select('id,provider,plan_code,billing_period,amount,currency,reference,status,created_at').single()
+    if (error) throw error
+    res.status(201).json({ payment: data, message: 'Demande reçue. Le forfait sera activé après vérification manuelle du paiement.' })
+  } catch (error) { fail(res, error, error?.code ? 503 : 400) }
+})
+app.get('/api/admin/payment-requests', authenticate, async (req, res) => {
+  if (!ADMIN_USER_IDS.has(req.user.id)) return res.status(403).json({ error: 'Accès administrateur refusé.' })
+  try {
+    const { data, error } = await adminClient.from('payment_requests').select('*').order('created_at', { ascending: true }).limit(100)
+    if (error) throw error
+    res.json({ payments: data || [] })
+  } catch (error) { fail(res, error) }
+})
+app.post('/api/admin/payment-requests/:id/review', authenticate, async (req, res) => {
+  if (!ADMIN_USER_IDS.has(req.user.id)) return res.status(403).json({ error: 'Accès administrateur refusé.' })
+  try {
+    const status = String(req.body?.status || '')
+    const note = String(req.body?.note || '').slice(0, 500)
+    if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'Décision invalide.' })
+    const { data: payment, error: readError } = await adminClient.from('payment_requests').select('*').eq('id', req.params.id).maybeSingle()
+    if (readError) throw readError
+    if (!payment) return res.status(404).json({ error: 'Demande introuvable.' })
+    if (payment.status !== 'pending') return res.status(409).json({ error: 'Cette demande a déjà été traitée.' })
+    const { error: reviewError } = await adminClient.rpc('admin_review_payment_request', {
+      p_payment_id: payment.id, p_status: status, p_note: note, p_reviewer: req.user.id,
+    })
+    if (reviewError) throw reviewError
+    res.json({ success: true, status })
+  } catch (error) { fail(res, error) }
+})
 
 app.get('/api/health', async (_req, res) => {
   try {
@@ -322,6 +445,14 @@ app.post('/api/monitors', async (req, res) => {
     const interval = intervals[req.body?.interval] || 300
     if (!name || name.length > 120) return res.status(400).json({ error: 'Le nom doit contenir entre 1 et 120 caractères.' })
     if (!adminClient) return res.status(503).json({ error: 'Le service de contrôle serveur n’est pas configuré.' })
+    const subscription = await getSubscription(req.user.id)
+    const plan = PLAN_LIMITS[subscription.plan_code] || PLAN_LIMITS.free
+    if (intervals[req.body?.interval] && intervals[req.body.interval] < plan.minInterval) {
+      return res.status(403).json({ error: `Ton forfait ${plan.label} impose une fréquence minimale de ${Math.round(plan.minInterval / 60)} minute(s).` })
+    }
+    const { count: monitorCount, error: countError } = await adminClient.from('monitors').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id)
+    if (countError) throw countError
+    if ((monitorCount || 0) >= plan.monitors) return res.status(403).json({ error: `Limite atteinte : ${plan.monitors} moniteur(s) avec le forfait ${plan.label}. Les moniteurs existants sont conservés. Passe à un forfait supérieur pour en ajouter.` })
     const { data: created, error } = await req.db.from('monitors').insert({ name, url, monitor_type: type, interval_seconds: interval, status: 'up' })
       .select('id,name,url,monitor_type,interval_seconds,status,response_ms,last_check_at,created_at').single()
     if (error) throw error
@@ -348,6 +479,9 @@ app.patch('/api/monitors/:id', async (req, res) => {
     }
     if (req.body?.interval !== undefined) {
       if (!intervals[req.body.interval]) return res.status(400).json({ error: 'Fréquence invalide.' })
+      const subscription = await getSubscription(req.user.id)
+      const plan = PLAN_LIMITS[subscription.plan_code] || PLAN_LIMITS.free
+      if (intervals[req.body.interval] < plan.minInterval) return res.status(403).json({ error: `Ton forfait ${plan.label} impose une fréquence minimale de ${Math.round(plan.minInterval / 60)} minute(s).` })
       changes.interval_seconds = intervals[req.body.interval]
     }
     if (!Object.keys(changes).length) return res.status(400).json({ error: 'Aucune modification reçue.' })
@@ -406,8 +540,19 @@ app.get('/api/monitors/:id/checks', async (req, res) => {
   try {
     const monitor = await getOwnedMonitor(req.db, req.params.id)
     if (!monitor) return res.status(404).json({ error: 'Moniteur introuvable.' })
-    const rows = await readChecks(req.db, monitor.id, new Date(Date.now() - 30 * 86400000).toISOString())
+    const { data: subscription } = await req.db.from('subscriptions').select('plan_code').maybeSingle()
+    const historyDays = PLAN_LIMITS[subscription?.plan_code || 'free']?.historyDays || 7
+    const rows = await readChecks(req.db, monitor.id, new Date(Date.now() - historyDays * 86400000).toISOString())
     res.json({ checks: rows.reverse().map((row) => ({ status: row.result_status, statusCode: row.status_code, responseMs: row.response_ms, error: row.error_message, checkedAt: row.checked_at })) })
+  } catch (error) { fail(res, error) }
+})
+app.get('/api/incidents', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await req.db.from('monitor_incidents')
+      .select('id,monitor_id,started_at,resolved_at,cause,monitors(name,url)')
+      .order('started_at', { ascending: false }).limit(200)
+    if (error) throw error
+    res.json({ incidents: data || [] })
   } catch (error) { fail(res, error) }
 })
 app.delete('/api/monitors/:id', async (req, res) => {

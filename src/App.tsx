@@ -17,6 +17,15 @@ type Monitor = {
 type Check = { status: 'up' | 'down'; statusCode: number | null; responseMs: number | null; error: string | null; checkedAt: string }
 type Section = 'overview' | 'monitors' | 'incidents' | 'settings'
 type MonitorForm = { name: string; url: string; type: Monitor['type']; interval: string }
+type Incident = { id: number; monitor_id: number; started_at: string; resolved_at: string | null; cause: string | null; monitors?: { name: string; url: string } | null }
+type AccountInfo = {
+  email: string
+  subscription: { planCode: string; status: string; periodEnd: string | null; label: string; monitors: number; historyDays: number; minInterval: number }
+  usage: { monitors: number; limit: number; remaining: number }
+  plans: { code: string; label: string; monitors: number; historyDays: number; minInterval: number }[]
+  paymentMethods: { natcash: { recipient: string; phone: string }; meru: { tag: string } }
+  payments: { id: number; provider: string; billing_period: string; amount: number; currency: string; reference: string; status: string; created_at: string }[]
+}
 const emptyForm: MonitorForm = { name: '', url: '', type: 'HTTP', interval: '5 min' }
 
 function StatusBadge({ status }: { status: Status }) {
@@ -78,6 +87,11 @@ function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => 
   const [apiError, setApiError] = useState('')
   const [toast, setToast] = useState('')
   const [lastUpdated, setLastUpdated] = useState(new Date())
+  const [account, setAccount] = useState<AccountInfo | null>(null)
+  const [incidents, setIncidents] = useState<Incident[]>([])
+  const [paymentForm, setPaymentForm] = useState({ planCode: 'starter', provider: 'natcash', billingPeriod: 'monthly', amount: '', currency: 'HTG', reference: '', proofUrl: '' })
+  const [paymentBusy, setPaymentBusy] = useState(false)
+  const [paymentMessage, setPaymentMessage] = useState('')
   const [mobileOpen, setMobileOpen] = useState(false)
   const selected = monitors.find((m) => m.id === selectedId) || null
 
@@ -100,12 +114,46 @@ function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => 
     finally { if (!silent) setLoading(false) }
   }, [apiFetch])
 
+  const loadAccount = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/account')
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Compte indisponible.')
+      setAccount(data)
+    } catch (error) { setApiError(error instanceof Error ? error.message : 'Compte indisponible.') }
+  }, [apiFetch])
+
+  const loadIncidents = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/incidents')
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Historique des incidents indisponible.')
+      setIncidents(Array.isArray(data.incidents) ? data.incidents : [])
+    } catch (error) { setApiError(error instanceof Error ? error.message : 'Incidents indisponibles.') }
+  }, [apiFetch])
+
+  useEffect(() => { if (section === 'incidents') void loadIncidents() }, [section, loadIncidents])
+
+  const submitPaymentRequest = async (event: FormEvent) => {
+    event.preventDefault(); setPaymentBusy(true); setPaymentMessage(''); setApiError('')
+    try {
+      const response = await apiFetch('/api/payment-requests', { method: 'POST', body: JSON.stringify(paymentForm) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Demande impossible.')
+      setPaymentMessage(data.message || 'Demande envoyée.')
+      setPaymentForm({ ...paymentForm, reference: '', proofUrl: '' })
+      await loadAccount()
+    } catch (error) { setApiError(error instanceof Error ? error.message : 'Demande impossible.') }
+    finally { setPaymentBusy(false) }
+  }
+
   useEffect(() => {
     void loadMonitors()
+    void loadAccount()
     // Le serveur effectue les contrôles. Le navigateur ne déclenche que la lecture.
     const timer = window.setInterval(() => void loadMonitors(true), 30000)
     return () => window.clearInterval(timer)
-  }, [loadMonitors])
+  }, [loadMonitors, loadAccount])
   useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 3200)
@@ -228,9 +276,19 @@ function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => 
           <section className="stats-grid"><div className="stat-card stat-card-featured"><div className="stat-topline"><span>Moniteurs actifs</span><MonitorDot size={16} /></div><div className="stat-value">{stats.up + stats.down}<span className="stat-total"> / {monitors.length}</span></div><div className="stat-foot"><span className="positive">{stats.up} opérationnel(s)</span><span>contrôles réels</span></div></div><div className="stat-card"><div className="stat-topline"><span>Uptime moyen</span><ShieldCheck size={16} /></div><div className="stat-value">{stats.uptime.toFixed(2)}<span className="stat-unit">%</span></div><div className="stat-foot"><span>calculé sur 30 jours</span></div></div><div className="stat-card"><div className="stat-topline"><span>Temps de réponse</span><Gauge size={16} /></div><div className="stat-value">{stats.response ? Math.round(stats.response) : '—'}<span className="stat-unit">{stats.response ? ' ms' : ''}</span></div><div className="stat-foot"><span>moyenne des réponses</span></div></div><div className="stat-card stat-card-alert"><div className="stat-topline"><span>Incidents ouverts</span><AlertTriangle size={16} /></div><div className="stat-value">{stats.down}</div><div className="stat-foot"><span>{stats.paused} en pause</span></div></div></section>
           <section className="panel monitor-panel"><div className="panel-heading panel-heading-list"><div><h2>Services surveillés</h2><p>Dernier état connu de chaque moniteur.</p></div><button className="text-button" onClick={() => navigate('monitors')}>Tout voir <ChevronRight size={15} /></button></div>{loading ? <div className="empty-state"><RefreshCw className="spin-icon" size={24} /><strong>Chargement...</strong></div> : table(monitors.slice(0, 6))}</section>
         </>}
-        {section === 'monitors' && <section className="monitors-page"><section className="page-intro monitors-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> MONITORING CENTER</div><h1>Tous les moniteurs</h1><p>Gestion, configuration et contrôles manuels.</p></div><button className="button button-primary" onClick={() => setShowAdd(true)}><Plus size={17} /> Ajouter un moniteur</button></section><div className="monitors-toolbar"><div className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un moniteur..." /></div><div className="filter-group"><span>État :</span>{(['all', 'up', 'down', 'paused'] as const).map((v) => <button key={v} className={`filter-chip ${filter === v ? 'filter-active' : ''}`} onClick={() => setFilter(v)}>{v === 'all' ? 'Tous' : v === 'up' ? 'Opérationnels' : v === 'down' ? 'En panne' : 'En pause'}</button>)}</div></div><div className="panel monitor-panel full-monitor-panel">{loading ? <div className="empty-state">Chargement...</div> : table(visible)}</div></section>}
-        {section === 'incidents' && <section className="monitors-page"><section className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> MONITORING CENTER</div><h1>Incidents</h1><p>Services actuellement signalés en panne.</p></div></section><div className="panel monitor-panel">{table(monitors.filter((m) => m.status === 'down'))}</div></section>}
-        {section === 'settings' && <section className="monitors-page"><section className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> WORKSPACE</div><h1>Paramètres</h1><p>Configuration de ton espace de surveillance.</p></div></section><div className="panel monitor-panel"><div className="panel-heading"><div><h2>Compte</h2><p>{session.user.email}</p></div><ShieldCheck size={22} /></div><div className="config-list"><div><span>Authentification</span><strong>Supabase Auth</strong></div><div><span>Isolation des données</span><strong>RLS activé</strong></div><div><span>Contrôles automatiques</span><strong>Serveur — 30 secondes de vérification des échéances</strong></div><div><span>Notifications email</span><strong>Non configurées</strong></div></div><p className="detail-footer-note">Les alertes email ne sont pas activées tant qu’un fournisseur et des préférences de notification ne sont pas configurés.</p></div></section>}
+        {section === 'monitors' && <section className="monitors-page"><section className="page-intro monitors-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> MONITORING CENTER</div><h1>Tous les moniteurs</h1><p>Gestion, configuration et contrôles manuels.</p>{account && <p className="quota-line">Forfait {account.subscription.label} · {account.usage.monitors}/{account.usage.limit} moniteurs utilisés</p>}</div><button className="button button-primary" disabled={!!account && account.usage.remaining <= 0} onClick={() => setShowAdd(true)}><Plus size={17} /> Ajouter un moniteur</button></section><div className="monitors-toolbar"><div className="search-box"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un moniteur..." /></div><div className="filter-group"><span>État :</span>{(['all', 'up', 'down', 'paused'] as const).map((v) => <button key={v} className={`filter-chip ${filter === v ? 'filter-active' : ''}`} onClick={() => setFilter(v)}>{v === 'all' ? 'Tous' : v === 'up' ? 'Opérationnels' : v === 'down' ? 'En panne' : 'En pause'}</button>)}</div></div><div className="panel monitor-panel full-monitor-panel">{loading ? <div className="empty-state">Chargement...</div> : table(visible)}</div></section>}
+        {section === 'incidents' && <section className="monitors-page"><section className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> MONITORING CENTER</div><h1>Incidents</h1><p>Historique des pannes et rétablissements détectés.</p></div></section><div className="panel monitor-panel"><div className="panel-heading"><div><h2>Historique des incidents</h2><p>Jusqu’aux 200 derniers événements.</p></div><button className="text-button" onClick={() => void loadIncidents()}><RefreshCw size={14} /> Actualiser</button></div>{incidents.length ? <div className="incident-list">{incidents.map((incident) => <div className="incident-row" key={incident.id}><span className={`incident-state ${incident.resolved_at ? 'incident-resolved' : 'incident-open'}`} /> <div><strong>{incident.monitors?.name || `Moniteur #${incident.monitor_id}`}</strong><small>{incident.monitors?.url || ''}</small><p>{incident.cause || 'Échec du contrôle'}</p></div><div className="incident-times"><strong>{incident.resolved_at ? 'Résolu' : 'En cours'}</strong><span>{new Date(incident.started_at).toLocaleString('fr-FR')}</span>{incident.resolved_at && <span>Fin : {new Date(incident.resolved_at).toLocaleString('fr-FR')}</span>}</div></div>)}</div> : <div className="empty-state"><CheckCircle2 size={24} /><strong>Aucun incident enregistré.</strong><span>Les incidents apparaîtront après une panne détectée.</span></div>}</div></section>}
+        {section === 'settings' && <section className="monitors-page"><section className="page-intro"><div><div className="eyebrow"><span className="eyebrow-line" /> WORKSPACE</div><h1>Paramètres</h1><p>Configuration de ton espace de surveillance.</p></div></section><div className="panel monitor-panel">
+          <div className="panel-heading"><div><h2>Compte et forfait</h2><p>{session.user.email}</p></div><ShieldCheck size={22} /></div>
+          {account ? <><div className="plan-summary"><div><span>Forfait actuel</span><strong>{account.subscription.label}</strong><small>{account.subscription.status === 'active' ? 'Actif' : account.subscription.status}</small></div><div><span>Moniteurs utilisés</span><strong>{account.usage.monitors} / {account.usage.limit}</strong><small>{account.usage.remaining} restant(s)</small></div><div><span>Historique inclus</span><strong>{account.subscription.historyDays} jours</strong><small>Fréquence min. {Math.round(account.subscription.minInterval / 60)} min</small></div></div>
+          <div className="plan-grid">{account.plans.map((plan) => <div className={`plan-card ${plan.code === account.subscription.planCode ? 'plan-current' : ''}`} key={plan.code}><strong>{plan.label}</strong><b>{plan.monitors} moniteurs</b><span>{plan.historyDays} jours d’historique</span><span>Intervalle min. {Math.round(plan.minInterval / 60)} min</span>{plan.code === account.subscription.planCode && <small>Forfait actuel</small>}</div>)}</div>
+          <div className="detail-section"><div className="detail-section-title"><h3>Demander un forfait payant</h3><span>Activation après validation</span></div><p className="payment-help">Les paiements sont vérifiés manuellement pour le moment. N’indique jamais ton code PIN ni ton mot de passe de paiement.</p>
+          <div className="payment-destinations"><div><strong>NatCash</strong><span>{account.paymentMethods.natcash.recipient}</span><b>{account.paymentMethods.natcash.phone}</b></div><div><strong>Meru Tag</strong><b>{account.paymentMethods.meru.tag}</b></div></div>
+          <form className="payment-form" onSubmit={submitPaymentRequest}><div className="form-row"><label>Forfait<select value={paymentForm.planCode} onChange={(e) => setPaymentForm({ ...paymentForm, planCode: e.target.value })}><option value="starter">Starter</option><option value="pro">Pro</option><option value="business">Business</option></select></label><label>Période<select value={paymentForm.billingPeriod} onChange={(e) => setPaymentForm({ ...paymentForm, billingPeriod: e.target.value })}><option value="monthly">Mensuelle</option><option value="annual">Annuelle</option></select></label></div><div className="form-row"><label>Paiement<select value={paymentForm.provider} onChange={(e) => setPaymentForm({ ...paymentForm, provider: e.target.value })}><option value="natcash">NatCash</option><option value="meru">Meru</option></select></label><label>Devise<select value={paymentForm.currency} onChange={(e) => setPaymentForm({ ...paymentForm, currency: e.target.value })}><option value="HTG">HTG</option><option value="USD">USD</option></select></label></div><div className="form-row"><label>Montant payé<input type="number" min="0.01" step="0.01" value={paymentForm.amount} onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })} required /></label><label>Référence transaction<input value={paymentForm.reference} onChange={(e) => setPaymentForm({ ...paymentForm, reference: e.target.value })} maxLength={160} required /></label></div><label>Lien de preuve HTTPS (facultatif)<input type="url" placeholder="https://..." value={paymentForm.proofUrl} onChange={(e) => setPaymentForm({ ...paymentForm, proofUrl: e.target.value })} /></label><button className="button button-primary" disabled={paymentBusy}>{paymentBusy ? 'Envoi...' : 'Envoyer la demande de vérification'}</button>{paymentMessage && <p className="payment-success">{paymentMessage}</p>}</form></div>
+          <div className="detail-section"><div className="detail-section-title"><h3>Historique des demandes</h3></div>{account.payments.length ? <div className="config-list">{account.payments.map((payment) => <div key={payment.id}><span>{payment.provider.toUpperCase()} · {payment.billing_period === 'annual' ? 'Annuel' : 'Mensuel'} · {payment.amount} {payment.currency}</span><strong>{payment.status === 'pending' ? 'En attente' : payment.status === 'approved' ? 'Approuvé' : 'Refusé'}</strong></div>)}</div> : <p className="payment-help">Aucune demande de paiement.</p>}</div></> : <div className="empty-state"><RefreshCw className="spin-icon" size={20} />Chargement du compte...</div>}
+          <div className="config-list"><div><span>Authentification</span><strong>Supabase Auth</strong></div><div><span>Isolation des données</span><strong>RLS activé</strong></div><div><span>Contrôles automatiques</span><strong>Serveur — 30 secondes</strong></div><div><span>Support</span><strong><a href="mailto:marcododji284@gmail.com">marcododji284@gmail.com</a></strong></div></div>
+          <p className="detail-footer-note">Les alertes email ne sont pas activées. Les demandes NatCash et Meru restent en attente jusqu’à vérification par un administrateur.</p>
+        </div></section>}
       </main>
       <footer className="footer"><span>© 2026 Mzouti Uptime</span><span>by <strong>Mzouti</strong> — All Right reserved</span><span className="footer-links">Monitoring réel</span></footer>
     </div>

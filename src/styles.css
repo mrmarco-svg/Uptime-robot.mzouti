@@ -265,3 +265,43 @@ tbody tr:hover { background: #fbfbfe; }
 .history-row strong { max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text,#4c5970); }
 .history-row small { white-space:nowrap; }
 .detail-actions + .delete-monitor-button { display:flex; align-items:center; justify-content:center; gap:7px; }
+
+
+/* Subscription and payment UI */
+.quota-line { margin-top: 8px !important; color: #68748b !important; font-weight: 700; }
+.plan-summary { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; margin: 20px 0; }
+.plan-summary > div, .plan-card { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.plan-summary span, .plan-card span { color: #929cad; font-size: 10px; }
+.plan-summary strong { color: #354158; font-size: 18px; }
+.plan-summary small, .plan-card small { color: var(--blue); font-size: 10px; }
+.plan-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 9px; }
+.plan-card strong { color: #354158; font-size: 12px; }
+.plan-card b { color: #52617a; font-size: 11px; }
+.plan-current { border-color: #8792f3; background: #f7f7ff; }
+.payment-help { margin: 10px 0 14px; color: #8c97a9; font-size: 10px; line-height: 1.6; }
+.payment-destinations { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-bottom: 14px; }
+.payment-destinations > div { display: flex; flex-direction: column; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.payment-destinations strong { color: #455269; font-size: 11px; }
+.payment-destinations span { color: #8994a7; font-size: 10px; }
+.payment-destinations b { color: #354158; font-family: 'DM Mono',monospace; font-size: 12px; }
+.payment-form { display: grid; gap: 12px; max-width: 700px; }
+.payment-form label { display: grid; gap: 6px; color: #7e899d; font-size: 10px; }
+.payment-form input, .payment-form select { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 7px; color: #455269; background: white; font: inherit; font-size: 11px; }
+.payment-form .form-row { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.payment-form > .button { justify-self: start; }
+.payment-success { color: #218b67; font-size: 11px; }
+@media (max-width: 720px) {
+  .plan-summary { grid-template-columns: 1fr; }
+  .plan-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .payment-destinations { grid-template-columns: 1fr; }
+}
+
+.incident-list { margin-top: 16px; }
+.incident-row { display: grid; grid-template-columns: 9px minmax(0,1fr) auto; gap: 12px; align-items: start; padding: 14px 2px; border-top: 1px solid #f0f1f5; }
+.incident-state { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--red); }
+.incident-resolved { background: var(--green); }
+.incident-row strong { display: block; color: #455269; font-size: 11px; }
+.incident-row small, .incident-row p, .incident-times span { display: block; margin-top: 4px; color: #929cad; font-size: 9px; }
+.incident-times { text-align: right; }
+.incident-times strong { color: #bd7c2f; }
+@media(max-width:600px) { .incident-row { grid-template-columns: 9px minmax(0,1fr); } .incident-times { grid-column: 2; text-align: left; } }
