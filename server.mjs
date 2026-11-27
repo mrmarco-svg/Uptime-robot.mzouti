@@ -37,6 +37,7 @@ const allowedTypes = new Set(['HTTP', 'PING', 'PORT'])
 const inFlight = new Set()
 
 if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('SUPABASE_URL et SUPABASE_PUBLISHABLE_KEY sont obligatoires.')
+if (!SERVICE_ROLE_KEY) throw new Error('SUPABASE_SERVICE_ROLE_KEY est obligatoire pour le monitoring serveur.')
 
 const app = express()
 app.disable('x-powered-by')
@@ -45,7 +46,6 @@ app.use(express.json({ limit: '32kb' }))
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
-  res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
   if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store')
   next()
@@ -54,9 +54,9 @@ app.use((req, res, next) => {
 const publicClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
 })
-const adminClient = SERVICE_ROLE_KEY ? createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+const adminClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-}) : null
+})
 
 function makeUserClient(token) {
   return createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -424,12 +424,12 @@ app.post('/api/admin/payment-requests/:id/review', authenticate, async (req, res
 
 app.get('/api/health', async (_req, res) => {
   try {
-    const { error } = await (adminClient || publicClient).from('monitors').select('id').limit(1)
+    const { error } = await adminClient.from('monitors').select('id').limit(1)
     if (error) throw error
-    res.json({ ok: true, service: 'Mzouti Uptime', database: 'connected', backgroundMonitoring: Boolean(adminClient), time: new Date().toISOString() })
+    res.json({ ok: true, service: 'Mzouti Uptime', database: 'connected', backgroundMonitoring: true, cronCallbackConfigured: Boolean(CRON_SECRET), time: new Date().toISOString() })
   } catch (error) {
     console.error('Health check failed:', error.message)
-    res.status(503).json({ ok: false, service: 'Mzouti Uptime', database: 'unavailable' })
+    res.status(503).json({ ok: false, service: 'Mzouti Uptime', database: 'unavailable', backgroundMonitoring: false })
   }
 })
 
@@ -588,12 +588,10 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Mzouti Uptime listening on port ${port}`)
-  console.log(adminClient ? 'Background monitoring enabled.' : 'Background monitoring disabled: SUPABASE_SERVICE_ROLE_KEY is missing.')
+  console.log('Background monitoring enabled.')
 })
-if (adminClient) {
-  const timer = setInterval(() => checkDueMonitors(false).catch((error) => console.error('Background monitoring cycle failed:', error.message)), CHECK_INTERVAL_MS)
-  timer.unref()
-}
+const timer = setInterval(() => checkDueMonitors(false).catch((error) => console.error('Background monitoring cycle failed:', error.message)), CHECK_INTERVAL_MS)
+timer.unref()
 function shutdown() {
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(1), 10000).unref()
