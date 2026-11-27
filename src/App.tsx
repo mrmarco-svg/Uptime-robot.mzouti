@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
 import {
-  Activity, AlertTriangle, Bell, Check, CheckCircle2, ChevronDown, ChevronRight,
+  Activity, AlertTriangle, ArrowRight, Bell, Check, CheckCircle2, ChevronDown, ChevronRight,
   Clock3, ExternalLink, Gauge, Globe2, LayoutDashboard, Menu, MonitorDot,
   PauseCircle, PlayCircle, Plus, RefreshCw, Search, Settings2, ShieldCheck,
   Trash2, X, Zap,
@@ -28,6 +28,11 @@ type AccountInfo = {
 }
 const emptyForm: MonitorForm = { name: '', url: '', type: 'HTTP', interval: '5 min' }
 
+function navigateTo(path: string) {
+  window.history.pushState({}, '', path)
+  window.dispatchEvent(new PopStateEvent('popstate'))
+}
+
 function StatusBadge({ status }: { status: Status }) {
   const Icon = status === 'up' ? CheckCircle2 : status === 'down' ? AlertTriangle : PauseCircle
   const label = status === 'up' ? 'Opérationnel' : status === 'down' ? 'En panne' : 'En pause'
@@ -43,8 +48,8 @@ function Chart({ values }: { values: number[] }) {
   </svg>
 }
 
-function AuthScreen() {
-  const [mode, setMode] = useState<'login' | 'signup'>('login')
+function AuthScreen({ initialMode }: { initialMode: 'login' | 'signup' }) {
+  const [mode, setMode] = useState<'login' | 'signup'>(initialMode)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [pending, setPending] = useState(false)
@@ -68,7 +73,29 @@ function AuthScreen() {
     if (error) setError(error.message); else setMessage('Lien de réinitialisation envoyé.')
     setPending(false)
   }
-  return <div className="auth-shell"><div className="auth-card"><div className="auth-brand"><div className="brand-mark"><span /></div><div><div className="brand-name">mzouti<span>uptime</span></div><div className="brand-caption">simple. fiable. visible.</div></div></div><div className="auth-kicker"><ShieldCheck size={14} /> ESPACE SÉCURISÉ</div><h1>{mode === 'login' ? 'Bon retour.' : 'Créer ton espace.'}</h1><p className="auth-lead">Surveille tes sites avec des contrôles réels et privés.</p><form className="auth-form" onSubmit={submit}><label>Email<input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><label>Mot de passe<input type="password" minLength={6} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(e) => setPassword(e.target.value)} required /></label>{mode === 'login' && <button type="button" className="forgot-password" onClick={() => void reset()} disabled={pending}>Mot de passe oublié ?</button>}{error && <div className="auth-message auth-error"><AlertTriangle size={15} />{error}</div>}{message && <div className="auth-message auth-success"><CheckCircle2 size={15} />{message}</div>}<button className="button button-primary auth-submit" disabled={pending}>{pending ? 'Patiente...' : mode === 'login' ? 'Se connecter' : 'Créer mon compte'}</button></form><button className="auth-switch" onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setMessage('') }}>{mode === 'login' ? 'Créer un compte' : 'J’ai déjà un compte'}</button><div className="auth-note">Tes moniteurs sont protégés par Supabase Auth et les règles RLS.</div></div></div>
+  useEffect(() => { setMode(initialMode); setError(''); setMessage('') }, [initialMode])
+  return <div className="auth-shell"><div className="auth-card"><button className="auth-back" onClick={() => navigateTo('/')}><ChevronDown size={15} /> Retour à l’accueil</button><div className="auth-brand"><div className="brand-mark"><span /></div><div><div className="brand-name">mzouti<span>uptime</span></div><div className="brand-caption">simple. fiable. visible.</div></div></div><div className="auth-kicker"><ShieldCheck size={14} /> ESPACE SÉCURISÉ</div><h1>{mode === 'login' ? 'Bon retour.' : 'Créer ton espace.'}</h1><p className="auth-lead">Surveille tes sites avec des contrôles réels et privés.</p><form className="auth-form" onSubmit={submit}><label>Email<input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><label>Mot de passe<input type="password" minLength={6} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(e) => setPassword(e.target.value)} required /></label>{mode === 'login' && <button type="button" className="forgot-password" onClick={() => void reset()} disabled={pending}>Mot de passe oublié ?</button>}{error && <div className="auth-message auth-error"><AlertTriangle size={15} />{error}</div>}{message && <div className="auth-message auth-success"><CheckCircle2 size={15} />{message}</div>}<button className="button button-primary auth-submit" disabled={pending}>{pending ? 'Patiente...' : mode === 'login' ? 'Se connecter' : 'Créer mon compte'}</button></form><button className="auth-switch" onClick={() => { const next = mode === 'login' ? 'signup' : 'login'; setMode(next); navigateTo(next === 'login' ? '/login' : '/signup'); setError(''); setMessage('') }}>{mode === 'login' ? 'Créer un compte' : 'J’ai déjà un compte'}</button><div className="auth-note">Tes moniteurs sont protégés par Supabase Auth et les règles RLS.</div></div></div>
+}
+
+function LandingPage() {
+  return <div className="landing-shell">
+    <header className="landing-nav">
+      <button className="landing-brand" onClick={() => navigateTo('/')} aria-label="Mzouti Uptime, accueil"><span className="brand-mark"><span /></span><span><strong>mzouti<span>uptime</span></strong><small>simple. fiable. visible.</small></span></button>
+      <nav className="landing-nav-links" aria-label="Navigation principale"><a href="#fonctionnalites">Fonctionnalités</a><a href="#fonctionnement">Comment ça marche</a><a href="#securite">Sécurité</a></nav>
+      <div className="landing-nav-actions"><button className="landing-login" onClick={() => navigateTo('/login')}>Se connecter</button><button className="button button-primary button-small" onClick={() => navigateTo('/signup')}>Commencer gratuitement <ArrowRight size={14} /></button></div>
+    </header>
+    <main>
+      <section className="landing-hero">
+        <div className="hero-copy"><div className="landing-kicker"><span className="landing-kicker-dot" /> MONITORING RÉEL, SANS SURPRISE</div><h1>Ton site doit rester<br /><em>toujours en ligne.</em></h1><p>Mzouti Uptime surveille tes services avec de vrais contrôles HTTP, PING et PORT, puis te donne une vue claire de leur disponibilité.</p><div className="hero-actions"><button className="button button-primary hero-cta" onClick={() => navigateTo('/signup')}>Surveiller mon premier site <ArrowRight size={16} /></button><button className="hero-secondary" onClick={() => document.getElementById('fonctionnement')?.scrollIntoView({ behavior: 'smooth' })}>Découvrir la plateforme <ChevronDown size={15} /></button></div><div className="hero-proof"><div className="proof-avatars"><span>M</span><span>U</span><span>+</span></div><span>Une surveillance pensée pour les équipes qui veulent dormir tranquilles.</span></div></div>
+        <div className="hero-visual" aria-label="Aperçu de la console Mzouti Uptime"><div className="hero-glow" /><div className="preview-window"><div className="preview-topbar"><div className="preview-dots"><i /><i /><i /></div><span>mzouti uptime / workspace</span><span className="preview-live"><b /> LIVE</span></div><div className="preview-body"><div className="preview-side"><div className="preview-logo"><span className="brand-mark"><span /></span><b>mzouti<span>uptime</span></b></div><div className="preview-side-item preview-side-active"><LayoutDashboard size={12} /> Vue d’ensemble</div><div className="preview-side-item"><MonitorDot size={12} /> Moniteurs <small>4</small></div><div className="preview-side-item"><AlertTriangle size={12} /> Incidents</div><div className="preview-side-bottom"><ShieldCheck size={13} /> Monitoring actif</div></div><div className="preview-content"><div className="preview-heading"><div><span>MONITORING CENTER</span><strong>Bonjour, Mzouti ✦</strong></div><span className="preview-time">Actualisé à l’instant</span></div><div className="preview-stats"><div><span>Moniteurs actifs</span><strong>4 <small>/ 4</small></strong><b>4 opérationnels</b></div><div><span>Uptime moyen</span><strong>99.98<small>%</small></strong><b>sur 30 jours</b></div><div><span>Temps de réponse</span><strong>184<small> ms</small></strong><b>réponse moyenne</b></div></div><div className="preview-panel"><div className="preview-panel-head"><div><b>Services surveillés</b><span>Dernier état connu de chaque moniteur.</span></div><span>Tout voir ›</span></div>{['Site vitrine', 'API production', 'Dashboard client'].map((name, index) => <div className="preview-monitor" key={name}><i /><div><b>{name}</b><span>{index === 1 ? 'api.mzouti.com' : index === 2 ? 'app.mzouti.com' : 'mzouti.com'}</span></div><strong>Opérationnel</strong><small>{index === 0 ? '142 ms' : index === 1 ? '96 ms' : '218 ms'}</small></div>)}</div></div></div></div></div>
+      </section>
+      <section className="landing-trust"><span>CONÇU POUR SURVEILLER CE QUI COMPTE</span><div><b><Globe2 size={15} /> Sites web</b><b><Zap size={15} /> APIs et services</b><b><Gauge size={15} /> Infrastructures</b><b><ShieldCheck size={15} /> Données privées</b></div></section>
+      <section className="landing-section features-section" id="fonctionnalites"><div className="section-heading"><div><div className="landing-kicker">POURQUOI MZOUTI UPTIME</div><h2>La visibilité dont ton activité a besoin.</h2></div><p>Un tableau de bord simple, des contrôles authentiques et les informations utiles au bon moment.</p></div><div className="feature-grid"><article className="feature-card feature-card-highlight"><div className="feature-icon"><Activity size={19} /></div><h3>Des contrôles vraiment réels</h3><p>Chaque vérification est exécutée côté serveur. HTTP, PING ou PORT : tu vois l’état réel de ton service, pas une donnée simulée.</p><span className="feature-link">Surveillance continue <ArrowRight size={14} /></span></article><article className="feature-card"><div className="feature-icon feature-icon-green"><CheckCircle2 size={19} /></div><h3>Une lecture instantanée</h3><p>Uptime, temps de réponse, historique des contrôles et incidents sont réunis dans une interface claire et rapide.</p><span className="feature-link">Comprendre en un coup d’œil <ArrowRight size={14} /></span></article><article className="feature-card"><div className="feature-icon feature-icon-orange"><ShieldCheck size={19} /></div><h3>Privé par conception</h3><p>Ton espace est protégé par Supabase Auth et chaque moniteur reste isolé grâce aux règles de sécurité RLS.</p><span className="feature-link">Un espace à toi <ArrowRight size={14} /></span></article></div></section>
+      <section className="landing-section how-section" id="fonctionnement"><div className="section-heading centered-heading"><div><div className="landing-kicker">EN TROIS ÉTAPES</div><h2>De l’inquiétude à la tranquillité.</h2></div><p>Quelques secondes suffisent pour mettre ton premier service sous surveillance.</p></div><div className="steps-grid"><div className="step"><span>01</span><div><h3>Crée ton espace</h3><p>Inscris-toi gratuitement avec ton adresse email.</p></div></div><div className="step"><span>02</span><div><h3>Ajoute ton service</h3><p>Indique une URL, un hôte ou un port à contrôler.</p></div></div><div className="step"><span>03</span><div><h3>Reste informé</h3><p>Consulte les contrôles réels et les incidents détectés.</p></div></div></div></section>
+      <section className="landing-cta" id="securite"><div><div className="landing-kicker">PRÊT À COMMENCER ?</div><h2>Ne découvre pas une panne<br />par tes utilisateurs.</h2><p>Lance ton premier contrôle réel maintenant. Mzouti Uptime est là pour garder un œil ouvert.</p></div><button className="button button-primary hero-cta" onClick={() => navigateTo('/signup')}>Créer mon espace <ArrowRight size={16} /></button></section>
+    </main>
+    <footer className="landing-footer"><button className="landing-brand" onClick={() => navigateTo('/')}><span className="brand-mark"><span /></span><span><strong>mzouti<span>uptime</span></strong><small>simple. fiable. visible.</small></span></button><span>© 2026 Mzouti Uptime — All Right reserved</span><span>Monitoring réel · Authentification Supabase</span></footer>
+  </div>
 }
 
 function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
@@ -302,12 +329,20 @@ function Dashboard({ session, onSignOut }: { session: Session; onSignOut: () => 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [ready, setReady] = useState(false)
+  const [path, setPath] = useState(() => window.location.pathname)
   useEffect(() => {
     let mounted = true
     void supabase.auth.getSession().then(({ data }) => { if (mounted) { setSession(data.session); setReady(true) } })
     const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => { setSession(next); setReady(true) })
     return () => { mounted = false; listener.subscription.unsubscribe() }
   }, [])
+  useEffect(() => {
+    const syncPath = () => setPath(window.location.pathname)
+    window.addEventListener('popstate', syncPath)
+    return () => window.removeEventListener('popstate', syncPath)
+  }, [])
   if (!ready) return <div className="auth-loading"><RefreshCw className="spin-icon" size={22} /> Vérification de la session...</div>
-  return session ? <Dashboard session={session} onSignOut={() => { void supabase.auth.signOut() }} /> : <AuthScreen />
+  if (session) return <Dashboard session={session} onSignOut={() => { void supabase.auth.signOut() }} />
+  if (path === '/login' || path === '/signup') return <AuthScreen initialMode={path === '/signup' ? 'signup' : 'login'} />
+  return <LandingPage />
 }

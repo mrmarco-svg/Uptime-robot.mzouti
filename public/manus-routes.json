@@ -1,1 +1,1 @@
-{"routes":[{"path":"/","title":"Dashboard"},{"path":"/monitors","title":"Moniteurs"}]}
+{"routes":[{"path":"/","title":"Accueil — Mzouti Uptime"},{"path":"/login","title":"Se connecter — Mzouti Uptime"},{"path":"/signup","title":"Créer un compte — Mzouti Uptime"},{"path":"/monitors","title":"Moniteurs"},{"path":"/incidents","title":"Incidents"},{"path":"/settings","title":"Paramètres"}]}
