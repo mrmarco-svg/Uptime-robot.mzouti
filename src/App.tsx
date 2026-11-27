@@ -27,6 +27,7 @@ type AccountInfo = {
   payments: { id: number; provider: string; billing_period: string; amount: number; currency: string; reference: string; status: string; created_at: string }[]
 }
 const emptyForm: MonitorForm = { name: '', url: '', type: 'HTTP', interval: '5 min' }
+const PUBLIC_APP_URL = 'https://uptime-robot-mzouti.onrender.com'
 
 function navigateTo(path: string) {
   window.history.pushState({}, '', path)
@@ -60,7 +61,7 @@ function AuthScreen({ initialMode }: { initialMode: 'login' | 'signup' }) {
     try {
       const result = mode === 'login'
         ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password })
+        : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${PUBLIC_APP_URL}/login` } })
       if (result.error) setError(result.error.message)
       else if (mode === 'signup' && !result.data.session) setMessage('Compte créé. Vérifie ton email pour confirmer ton inscription.')
     } catch { setError('Connexion impossible. Réessaie.') }
@@ -69,7 +70,7 @@ function AuthScreen({ initialMode }: { initialMode: 'login' | 'signup' }) {
   const reset = async () => {
     if (!email) { setError('Indique ton adresse email.'); return }
     setPending(true); setError(''); setMessage('')
-    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin })
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${PUBLIC_APP_URL}/login` })
     if (error) setError(error.message); else setMessage('Lien de réinitialisation envoyé.')
     setPending(false)
   }
